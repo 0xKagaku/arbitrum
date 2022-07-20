@@ -53,7 +53,7 @@ var (
 	BatchesCounter = metrics.NewRegisteredCounter("arbitrum/inbox/processed", nil)
 )
 var upgrader = websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}
-var logger = arblog.Logger.With().Str("component", "txdb").Logger()
+var logger = arblog.Logger.With().Str("component", "inboxReader").Logger()
 
 const RECENT_FEED_ITEM_TTL time.Duration = time.Second * 10
 
