@@ -20,12 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	ethcommon "github.com/ethereum/go-ethereum/common"
-	"github.com/offchainlabs/arbitrum/packages/arb-node-core/staker"
-	"github.com/offchainlabs/arbitrum/packages/arb-util/arblog"
-	"github.com/offchainlabs/arbitrum/packages/arb-util/ethbridgecontracts"
-	"github.com/offchainlabs/arbitrum/packages/arb-util/ethutils"
-	"github.com/offchainlabs/arbitrum/packages/arb-util/transactauth"
 	"io/ioutil"
 	golog "log"
 	"math/big"
@@ -34,6 +28,13 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/offchainlabs/arbitrum/packages/arb-node-core/staker"
+	"github.com/offchainlabs/arbitrum/packages/arb-util/arblog"
+	"github.com/offchainlabs/arbitrum/packages/arb-util/ethbridgecontracts"
+	"github.com/offchainlabs/arbitrum/packages/arb-util/ethutils"
+	"github.com/offchainlabs/arbitrum/packages/arb-util/transactauth"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -381,6 +382,7 @@ func startup() error {
 	metricsConfig.RegisterNodeStoreMetrics(nodeStore)
 	metricsConfig.RegisterArbCoreMetrics(mon.Core)
 	db, txDBErrChan, err := txdb.New(ctx, mon.Core, nodeStore, &config.Node)
+	db.Start()
 	if err != nil {
 		return errors.Wrap(err, "error opening txdb")
 	}

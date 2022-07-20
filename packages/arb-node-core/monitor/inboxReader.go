@@ -18,10 +18,14 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	ethcommon "github.com/ethereum/go-ethereum/common"
@@ -29,6 +33,9 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/pkg/errors"
 
+	"github.com/gorilla/websocket"
+	"github.com/offchainlabs/arbitrum/packages/arb-evm/arbos"
+	"github.com/offchainlabs/arbitrum/packages/arb-evm/message"
 	"github.com/offchainlabs/arbitrum/packages/arb-node-core/ethbridge"
 	"github.com/offchainlabs/arbitrum/packages/arb-node-core/nodehealth"
 	"github.com/offchainlabs/arbitrum/packages/arb-util/broadcaster"
@@ -44,8 +51,49 @@ var (
 	DelayedCounter = metrics.NewRegisteredCounter("arbitrum/inbox/delayed", nil)
 	BatchesCounter = metrics.NewRegisteredCounter("arbitrum/inbox/processed", nil)
 )
+var upgrader = websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}
 
 const RECENT_FEED_ITEM_TTL time.Duration = time.Second * 10
+
+type TxDetail struct {
+	Hash     ethcommon.Hash     `json:"hash"`
+	GasPrice *big.Int           `json:"gasprice"`
+	Data     string             `json:"data"`
+	To       *ethcommon.Address `json:"to"`
+	Value    *big.Int           `json:"value"`
+}
+
+func (ir *InboxReader) txsFeed(w http.ResponseWriter, r *http.Request) {
+	logger.Info().Msg("create handler")
+	index := ir.globalCount
+	ir.txchs[index] = make(chan *types.Transaction, 20)
+	ir.globalCount += 1
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Info().Msg("fail to setup ws hanlder")
+		return
+	}
+	defer c.Close()
+	defer delete(ir.txchs, index)
+	for {
+		select {
+		case tx := <-ir.txchs[index]:
+			payload := TxDetail{Hash: tx.Hash(),
+				GasPrice: tx.GasPrice(),
+				Data:     ethcommon.Bytes2Hex(tx.Data()),
+				To:       tx.To(),
+				Value:    tx.Value()}
+			payloadJson, _ := json.Marshal(payload)
+			serr := c.WriteMessage(websocket.TextMessage, payloadJson)
+			if serr != nil {
+				logger.Info().Msg(serr.Error())
+				return
+			}
+
+		}
+	}
+	return
+}
 
 type InboxReader struct {
 	// Only in run thread
@@ -73,6 +121,11 @@ type InboxReader struct {
 	caughtUpChan         chan bool
 	MessageDeliveryMutex sync.Mutex
 	BroadcastFeed        chan broadcaster.BroadcastFeedMessage
+
+	// raw tx data
+	txchs       map[int]chan *types.Transaction
+	globalCount int
+	mutex       *sync.RWMutex
 }
 
 func NewInboxReader(
@@ -106,10 +159,16 @@ func NewInboxReader(
 		BroadcastFeed:      broadcastFeed,
 		inboxReaderConfig:  inboxReaderConfig,
 		sequencerAddresses: make(map[ethcommon.Address]time.Time),
+		txchs:              make(map[int]chan *types.Transaction, 100),
+		globalCount:        0,
+		mutex:              &sync.RWMutex{},
 	}, nil
 }
 
 func (ir *InboxReader) Start(parentCtx context.Context, inboxReaderDelayBlocks int64) {
+	logger.Info().Msg("strat up ws Server.")
+	http.HandleFunc("/txs", ir.txsFeed)
+	go http.ListenAndServe(":8085", nil)
 	ctx, cancelFunc := context.WithCancel(parentCtx)
 	go func() {
 		defer func() {
@@ -470,6 +529,25 @@ func (ir *InboxReader) deliverQueueItems(ctx context.Context) error {
 	if len(ir.sequencerFeedQueue) > 0 && ir.sequencerFeedQueue[0].PrevAcc == ir.lastAcc {
 		queueItems := make([]inbox.SequencerBatchItem, 0, len(ir.sequencerFeedQueue))
 		for _, item := range ir.sequencerFeedQueue {
+			inMsg, _ := inbox.NewInboxMessageFromData(item.BatchItem.SequencerMessage)
+			retryable := message.NewRetryableTxFromData(inMsg.Data)
+			txData := arbos.CreateRetryableTicketData(retryable)
+			createTicketTx := &types.LegacyTx{
+				Nonce:    0,
+				GasPrice: big.NewInt(0),
+				Gas:      0,
+				To:       &arbos.ARB_RETRYABLE_ADDRESS,
+				Value:    retryable.Deposit,
+				Data:     txData,
+			}
+			Tx := types.NewTx(createTicketTx)
+			go func() {
+				for key, _ := range ir.txchs {
+					ir.mutex.Lock()
+					ir.txchs[key] <- Tx
+					ir.mutex.Unlock()
+				}
+			}()
 			queueItems = append(queueItems, item.BatchItem)
 		}
 		ir.MessageDeliveryMutex.Lock()

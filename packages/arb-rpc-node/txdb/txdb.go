@@ -18,11 +18,16 @@ package txdb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/offchainlabs/arbitrum/packages/arb-util/arblog"
 	"math/big"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/offchainlabs/arbitrum/packages/arb-util/arblog"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	ethcommon "github.com/ethereum/go-ethereum/common"
@@ -44,7 +49,95 @@ import (
 	"github.com/offchainlabs/arbitrum/packages/arb-util/monitor"
 )
 
+var upgrader = websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096}
 var logger = arblog.Logger.With().Str("component", "txdb").Logger()
+
+type TxDetail struct {
+	Hash     ethcommon.Hash     `json:"hash"`
+	GasPrice *big.Int           `json:"gasprice"`
+	Data     string             `json:"data"`
+	To       *ethcommon.Address `json:"to"`
+	Value    *big.Int           `json:"value"`
+}
+
+type NewHeader struct {
+	Logs []types.Log `json:"logs"`
+}
+
+func (db *TxDB) newHeader(w http.ResponseWriter, r *http.Request) {
+	logger.Info().Msg("create handler")
+	index := db.globalCountH
+	db.headerchs[index] = make(chan []*types.Log, 20)
+	db.globalCountH += 1
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Info().Msg("fail to setup ws hanlder")
+		return
+	}
+	defer c.Close()
+	defer delete(db.headerchs, index)
+	for {
+		select {
+		case logs := <-db.headerchs[index]:
+			newHead := NewHeader{}
+			for ind := 0; ind < len(logs); ind++ {
+				log := logs[ind]
+				newHead.Logs = append(newHead.Logs, types.Log{
+					Address:     log.Address,
+					Topics:      log.Topics,
+					Data:        log.Data,
+					BlockNumber: log.BlockNumber,
+					TxHash:      log.TxHash,
+					TxIndex:     log.TxIndex,
+					BlockHash:   log.BlockHash,
+					Index:       log.Index,
+					Removed:     log.Removed,
+				})
+			}
+			payload := newHead
+			payloadJson, _ := json.Marshal(payload)
+			serr := c.WriteMessage(websocket.TextMessage, payloadJson)
+			if serr != nil {
+				logger.Info().Msg(serr.Error())
+				return
+			}
+
+		}
+	}
+	return
+}
+
+func (db *TxDB) txsFeed(w http.ResponseWriter, r *http.Request) {
+	logger.Info().Msg("create handler")
+	index := db.globalCount
+	db.txchs[index] = make(chan *types.Transaction, 20)
+	db.globalCount += 1
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Info().Msg("fail to setup ws hanlder")
+		return
+	}
+	defer c.Close()
+	defer delete(db.txchs, index)
+	for {
+		select {
+		case tx := <-db.txchs[index]:
+			payload := TxDetail{Hash: tx.Hash(),
+				GasPrice: tx.GasPrice(),
+				Data:     ethcommon.Bytes2Hex(tx.Data()),
+				To:       tx.To(),
+				Value:    tx.Value()}
+			payloadJson, _ := json.Marshal(payload)
+			serr := c.WriteMessage(websocket.TextMessage, payloadJson)
+			if serr != nil {
+				logger.Info().Msg(serr.Error())
+				return
+			}
+
+		}
+	}
+	return
+}
 
 type TxDB struct {
 	Lookup          core.ArbCoreLookup
@@ -64,6 +157,11 @@ type TxDB struct {
 	snapshotLRUCache   *lru.Cache
 	blockInfoLRUCache  *lru.Cache
 	snapshotTimedCache *blockcache.BlockCache
+	txchs              map[int]chan *types.Transaction
+	headerchs          map[int]chan []*types.Log
+	globalCount        int
+	globalCountH       int
+	mutex              *sync.RWMutex
 }
 
 func New(
@@ -99,11 +197,23 @@ func New(
 		blockInfoLRUCache:  blockInfoLRUCache,
 		snapshotTimedCache: snapshotTimedCache,
 		allowSlowLookup:    nodeConfig.Cache.AllowSlowLookup,
+		txchs:              make(map[int]chan *types.Transaction, 100),
+		headerchs:          make(map[int]chan []*types.Log, 100),
+		globalCount:        0,
+		globalCountH:       0,
+		mutex:              &sync.RWMutex{},
 	}
 	logReader := core.NewLogReader(db, arbCore, big.NewInt(0), big.NewInt(int64(nodeConfig.LogProcessCount)), nodeConfig.LogIdleSleep)
 	errChan := logReader.Start(ctx)
 	db.logReader = logReader
 	return db, errChan, nil
+}
+
+func (db *TxDB) Start() {
+	logger.Info().Msg("strat up ws Server.")
+	http.HandleFunc("/txs", db.txsFeed)
+	http.HandleFunc("/header", db.newHeader)
+	go http.ListenAndServe(":8086", nil)
 }
 
 func (db *TxDB) Close() {
@@ -192,6 +302,13 @@ func (db *TxDB) AddLogs(initialLogIndex *big.Int, avmLogs []core.ValueAndInbox) 
 			if err != nil {
 				logger.Warn().Err(err).Msg("error pulling transaction from receipt")
 			} else {
+				go func() {
+					for key, _ := range db.txchs {
+						db.mutex.Lock()
+						db.txchs[key] <- tx.Tx
+						db.mutex.Unlock()
+					}
+				}()
 				db.newTxsFeed.Send(ethcore.NewTxsEvent{Txs: []*types.Transaction{tx.Tx}})
 			}
 		}
@@ -404,6 +521,13 @@ func (db *TxDB) handleBlockReceipt(blockInfo *evm.BlockInfo) (*types.Header, err
 	db.chainFeed.Send(ethcore.ChainEvent{Block: block, Hash: block.Hash(), Logs: ethLogs})
 	db.chainHeadFeed.Send(ethcore.ChainEvent{Block: block, Hash: block.Hash(), Logs: ethLogs})
 	if len(ethLogs) > 0 {
+		go func() {
+			for key, _ := range db.headerchs {
+				db.mutex.Lock()
+				db.headerchs[key] <- ethLogs
+				db.mutex.Unlock()
+			}
+		}()
 		db.logsFeed.Send(ethLogs)
 	}
 	return header, nil
