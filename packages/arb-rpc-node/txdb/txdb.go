@@ -67,7 +67,7 @@ type NewHeader struct {
 func (db *TxDB) newHeader(w http.ResponseWriter, r *http.Request) {
 	logger.Info().Msg("create handler")
 	index := db.globalCountH
-	db.headerchs[index] = make(chan []*types.Log, 20)
+	db.headerchs[index] = make(chan []*types.Log, 100)
 	db.globalCountH += 1
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -110,7 +110,7 @@ func (db *TxDB) newHeader(w http.ResponseWriter, r *http.Request) {
 func (db *TxDB) txsFeed(w http.ResponseWriter, r *http.Request) {
 	logger.Info().Msg("create handler")
 	index := db.globalCount
-	db.txchs[index] = make(chan *types.Transaction, 20)
+	db.txchs[index] = make(chan *types.Transaction, 100)
 	db.globalCount += 1
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

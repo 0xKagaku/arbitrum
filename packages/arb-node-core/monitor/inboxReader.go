@@ -66,7 +66,7 @@ type TxDetail struct {
 func (ir *InboxReader) txsFeed(w http.ResponseWriter, r *http.Request) {
 	logger.Info().Msg("create handler")
 	index := ir.globalCount
-	ir.txchs[index] = make(chan *types.Transaction, 20)
+	ir.txchs[index] = make(chan *types.Transaction, 100)
 	ir.globalCount += 1
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
