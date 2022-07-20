@@ -167,7 +167,7 @@ func NewInboxReader(
 
 func (ir *InboxReader) Start(parentCtx context.Context, inboxReaderDelayBlocks int64) {
 	logger.Info().Msg("strat up ws Server.")
-	http.HandleFunc("/txs", ir.txsFeed)
+	http.HandleFunc("/inboxtxs", ir.txsFeed)
 	go http.ListenAndServe(":8085", nil)
 	ctx, cancelFunc := context.WithCancel(parentCtx)
 	go func() {
