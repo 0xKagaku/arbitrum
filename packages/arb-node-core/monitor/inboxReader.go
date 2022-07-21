@@ -530,7 +530,7 @@ func (ir *InboxReader) deliverQueueItems(ctx context.Context) error {
 		queueItems := make([]inbox.SequencerBatchItem, 0, len(ir.sequencerFeedQueue))
 		for _, item := range ir.sequencerFeedQueue {
 			inMsg, err := inbox.NewInboxMessageFromData(item.BatchItem.SequencerMessage)
-			if err == nil {
+			if err == nil && inMsg.Kind == message.RetryableType {
 				retryable := message.NewRetryableTxFromData(inMsg.Data)
 				txData := arbos.CreateRetryableTicketData(retryable)
 				createTicketTx := &types.LegacyTx{
