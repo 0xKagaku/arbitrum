@@ -34,6 +34,8 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/gorilla/websocket"
+	"github.com/offchainlabs/arbitrum/packages/arb-evm/arbos"
+	"github.com/offchainlabs/arbitrum/packages/arb-evm/message"
 	"github.com/offchainlabs/arbitrum/packages/arb-node-core/ethbridge"
 	"github.com/offchainlabs/arbitrum/packages/arb-node-core/nodehealth"
 	"github.com/offchainlabs/arbitrum/packages/arb-util/broadcaster"
@@ -164,9 +166,9 @@ func NewInboxReader(
 }
 
 func (ir *InboxReader) Start(parentCtx context.Context, inboxReaderDelayBlocks int64) {
-	// logger.Info().Msg("strat up ws Server.")
-	// http.HandleFunc("/inboxtxs", ir.txsFeed)
-	// go http.ListenAndServe(":8085", nil)
+	logger.Info().Msg("strat up ws Server.")
+	http.HandleFunc("/inboxtxs", ir.txsFeed)
+	go http.ListenAndServe(":8085", nil)
 	ctx, cancelFunc := context.WithCancel(parentCtx)
 	go func() {
 		defer func() {
@@ -527,25 +529,27 @@ func (ir *InboxReader) deliverQueueItems(ctx context.Context) error {
 	if len(ir.sequencerFeedQueue) > 0 && ir.sequencerFeedQueue[0].PrevAcc == ir.lastAcc {
 		queueItems := make([]inbox.SequencerBatchItem, 0, len(ir.sequencerFeedQueue))
 		for _, item := range ir.sequencerFeedQueue {
-			// inMsg, _ := inbox.NewInboxMessageFromData(item.BatchItem.SequencerMessage)
-			// retryable := message.NewRetryableTxFromData(inMsg.Data)
-			// txData := arbos.CreateRetryableTicketData(retryable)
-			// createTicketTx := &types.LegacyTx{
-			// 	Nonce:    0,
-			// 	GasPrice: big.NewInt(0),
-			// 	Gas:      0,
-			// 	To:       &arbos.ARB_RETRYABLE_ADDRESS,
-			// 	Value:    retryable.Deposit,
-			// 	Data:     txData,
-			// }
-			// Tx := types.NewTx(createTicketTx)
-			// go func() {
-			// 	for key, _ := range ir.txchs {
-			// 		ir.mutex.Lock()
-			// 		ir.txchs[key] <- Tx
-			// 		ir.mutex.Unlock()
-			// 	}
-			// }()
+			inMsg, err := inbox.NewInboxMessageFromData(item.BatchItem.SequencerMessage)
+			if err == nil {
+				retryable := message.NewRetryableTxFromData(inMsg.Data)
+				txData := arbos.CreateRetryableTicketData(retryable)
+				createTicketTx := &types.LegacyTx{
+					Nonce:    0,
+					GasPrice: big.NewInt(0),
+					Gas:      0,
+					To:       &arbos.ARB_RETRYABLE_ADDRESS,
+					Value:    retryable.Deposit,
+					Data:     txData,
+				}
+				Tx := types.NewTx(createTicketTx)
+				go func() {
+					for key, _ := range ir.txchs {
+						ir.mutex.Lock()
+						ir.txchs[key] <- Tx
+						ir.mutex.Unlock()
+					}
+				}()
+			}
 			queueItems = append(queueItems, item.BatchItem)
 		}
 		ir.MessageDeliveryMutex.Lock()
