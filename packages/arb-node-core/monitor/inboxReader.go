@@ -525,31 +525,62 @@ func (ir *InboxReader) getMessages(ctx context.Context, temporarilyParanoid bool
 	}
 }
 
+func (ir *InboxReader) CatchTransaction(msg inbox.InboxMessage) (*types.Transaction, error) {
+	if msg.Kind == message.RetryableType {
+		retryable := message.NewRetryableTxFromData(msg.Data)
+		txData := arbos.CreateRetryableTicketData(retryable)
+		createTicketTx := &types.LegacyTx{
+			Nonce:    0,
+			GasPrice: big.NewInt(0),
+			Gas:      0,
+			To:       &arbos.ARB_RETRYABLE_ADDRESS,
+			Value:    retryable.Deposit,
+			Data:     txData,
+		}
+		return types.NewTx(createTicketTx), nil
+	}
+
+	if msg.Kind != message.L2Type && msg.Kind != message.EthDepositTxType {
+		return nil, errors.Errorf("result is not a transaction %v", msg.Kind)
+	}
+	l2msg, err := message.L2Message{Data: msg.Data}.AbstractMessage()
+	if err != nil {
+		return nil, err
+	}
+	ethMsg, ok := l2msg.(message.EthConvertable)
+	if !ok {
+		return nil, errors.New("message not convertible to receipt")
+	}
+
+	tx := ethMsg.AsEthTx()
+	if tx.To() == nil {
+		ethMsg, ok := ethMsg.(message.ContractTransaction)
+		if ok {
+			// If we're in a successful retryable send to the 0 address, it wasn't treated as contract construction
+			tx = ethMsg.AsNonConstructorTx()
+		}
+	}
+	return tx, nil
+}
+
 func (ir *InboxReader) deliverQueueItems(ctx context.Context) error {
 	if len(ir.sequencerFeedQueue) > 0 && ir.sequencerFeedQueue[0].PrevAcc == ir.lastAcc {
 		queueItems := make([]inbox.SequencerBatchItem, 0, len(ir.sequencerFeedQueue))
 		for _, item := range ir.sequencerFeedQueue {
 			inMsg, err := inbox.NewInboxMessageFromData(item.BatchItem.SequencerMessage)
-			if err == nil && inMsg.Kind == message.RetryableType {
-				retryable := message.NewRetryableTxFromData(inMsg.Data)
-				txData := arbos.CreateRetryableTicketData(retryable)
-				createTicketTx := &types.LegacyTx{
-					Nonce:    0,
-					GasPrice: big.NewInt(0),
-					Gas:      0,
-					To:       &arbos.ARB_RETRYABLE_ADDRESS,
-					Value:    retryable.Deposit,
-					Data:     txData,
+			if err == nil {
+				Tx, err := ir.CatchTransaction(inMsg)
+				if err == nil {
+					go func() {
+						for key, _ := range ir.txchs {
+							ir.mutex.Lock()
+							ir.txchs[key] <- Tx
+							ir.mutex.Unlock()
+						}
+					}()
 				}
-				Tx := types.NewTx(createTicketTx)
-				go func() {
-					for key, _ := range ir.txchs {
-						ir.mutex.Lock()
-						ir.txchs[key] <- Tx
-						ir.mutex.Unlock()
-					}
-				}()
 			}
+
 			queueItems = append(queueItems, item.BatchItem)
 		}
 		ir.MessageDeliveryMutex.Lock()
